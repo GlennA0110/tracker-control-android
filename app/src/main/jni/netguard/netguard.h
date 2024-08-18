@@ -95,6 +95,8 @@ struct arguments {
 struct allowed {
     char raddr[INET6_ADDRSTRLEN + 1];
     uint16_t rport; // host notation
+    jboolean isAllowed;
+    jboolean sendReject;
 };
 
 struct segment {

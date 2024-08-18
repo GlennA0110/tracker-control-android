@@ -285,6 +285,7 @@ void *handle_events(void *a) {
 void check_allowed(const struct arguments *args) {
     char source[INET6_ADDRSTRLEN + 1];
     char dest[INET6_ADDRSTRLEN + 1];
+    struct allowed *redirect = NULL;
 
     struct ng_session *l = NULL;
     struct ng_session *s = args->ctx->ng_session;
@@ -302,7 +303,8 @@ void check_allowed(const struct arguments *args) {
                 jobject objPacket = create_packet(
                         args, s->icmp.version, IPPROTO_ICMP, "",
                         source, 0, dest, 0, "", s->icmp.uid, 0);
-                if (is_address_allowed(args, objPacket) == NULL) {
+                redirect = is_address_allowed(args, objPacket);
+                if (redirect == NULL || !redirect->isAllowed) {
                     s->icmp.stop = 1;
                     log_android(ANDROID_LOG_WARN, "ICMP terminate %d uid %d",
                                 s->socket, s->icmp.uid);
@@ -322,7 +324,8 @@ void check_allowed(const struct arguments *args) {
                 jobject objPacket = create_packet(
                         args, s->udp.version, IPPROTO_UDP, "",
                         source, ntohs(s->udp.source), dest, ntohs(s->udp.dest), "", s->udp.uid, 0);
-                if (is_address_allowed(args, objPacket) == NULL) {
+                redirect = is_address_allowed(args, objPacket);
+                if (redirect == NULL || !redirect->isAllowed) {
                     s->udp.state = UDP_FINISHING;
                     log_android(ANDROID_LOG_WARN, "UDP terminate session socket %d uid %d",
                                 s->socket, s->udp.uid);
@@ -354,7 +357,8 @@ void check_allowed(const struct arguments *args) {
                 jobject objPacket = create_packet(
                         args, s->tcp.version, IPPROTO_TCP, "",
                         source, ntohs(s->tcp.source), dest, ntohs(s->tcp.dest), "", s->tcp.uid, 0);
-                if (is_address_allowed(args, objPacket) == NULL) {
+                redirect = is_address_allowed(args, objPacket);
+                if (redirect == NULL || !redirect->isAllowed) {
                     write_rst(args, &s->tcp);
                     log_android(ANDROID_LOG_WARN, "TCP terminate socket %d uid %d",
                                 s->socket, s->tcp.uid);

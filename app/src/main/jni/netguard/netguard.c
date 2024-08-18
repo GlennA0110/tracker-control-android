@@ -738,6 +738,8 @@ jint get_uid_q(const struct arguments *args,
 static jmethodID midIsAddressAllowed = NULL;
 jfieldID fidRaddr = NULL;
 jfieldID fidRport = NULL;
+jfieldID fidIsAllowed = NULL;
+jfieldID fidSendReject = NULL;
 struct allowed allowed;
 
 struct allowed *is_address_allowed(const struct arguments *args, jobject jpacket) {
@@ -764,6 +766,8 @@ struct allowed *is_address_allowed(const struct arguments *args, jobject jpacket
             const char *string = "Ljava/lang/String;";
             fidRaddr = jniGetFieldID(args->env, clsAllowed, "raddr", string);
             fidRport = jniGetFieldID(args->env, clsAllowed, "rport", "I");
+            fidIsAllowed = jniGetFieldID(args->env, clsAllowed, "isAllowed", "Z");
+            fidSendReject = jniGetFieldID(args->env, clsAllowed, "sendReject", "Z");
         }
 
         jstring jraddr = (*args->env)->GetObjectField(args->env, jallowed, fidRaddr);
@@ -778,9 +782,13 @@ struct allowed *is_address_allowed(const struct arguments *args, jobject jpacket
             ng_delete_alloc(raddr, __FILE__, __LINE__);
         }
         allowed.rport = (uint16_t) (*args->env)->GetIntField(args->env, jallowed, fidRport);
+        allowed.isAllowed = (jboolean) (*args->env)->GetBooleanField(args->env, jallowed, fidIsAllowed);
+        allowed.sendReject = (jboolean) (*args->env)->GetBooleanField(args->env, jallowed, fidSendReject);
 
         (*args->env)->DeleteLocalRef(args->env, jraddr);
         ng_delete_alloc(jraddr, __FILE__, __LINE__);
+    } else {
+        allowed.isAllowed = JNI_FALSE;
     }
 
 

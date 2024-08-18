@@ -23,14 +23,27 @@ package eu.faircode.netguard;
 public class Allowed {
     public String raddr;
     public int rport;
+    public boolean isAllowed;
+    public boolean sendReject;
 
     public Allowed() {
         this.raddr = null;
         this.rport = 0;
+        this.isAllowed = true;
+        this.sendReject = false;
+    }
+
+    public Allowed(boolean isAllowed, boolean sendReject) {
+        this.raddr = null;
+        this.rport = 0;
+        this.isAllowed = isAllowed;
+        this.sendReject = sendReject;
     }
 
     public Allowed(String raddr, int rport) {
         this.raddr = raddr;
         this.rport = rport;
+        this.isAllowed = true;
+        this.sendReject = false;
     }
 }

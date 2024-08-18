@@ -305,6 +305,7 @@ void handle_ip(const struct arguments *args,
 
     // Check if allowed
     int allowed = 0;
+    jboolean sendReject = JNI_FALSE;
     struct allowed *redirect = NULL;
     if (protocol == IPPROTO_UDP && has_udp_session(args, pkt, payload))
         allowed = 1; // could be a lingering/blocked session
@@ -364,7 +365,8 @@ void handle_ip(const struct arguments *args,
             jobject objPacket = create_packet(
                     args, version, protocol, flags, source, sport, dest, dport, packetdata, uid, 0);
             redirect = is_address_allowed(args, objPacket);
-            allowed = (redirect != NULL);
+            allowed = (redirect != NULL && redirect->isAllowed);
+            sendReject = redirect != NULL ? redirect->sendReject : JNI_FALSE;
             if (redirect != NULL && (*redirect->raddr == 0 || redirect->rport == 0))
                 redirect = NULL;
 
@@ -388,7 +390,7 @@ void handle_ip(const struct arguments *args,
         log_android(ANDROID_LOG_WARN, "Address v%d p%d %s/%u syn %d not allowed",
                     version, protocol, dest, dport, syn);
 
-        if (protocol == IPPROTO_TCP)
+        if (protocol == IPPROTO_TCP && sendReject)
             write_unreachable(args, pkt, length, ENETUNREACH);  //EHOSTUNREACH
     }
 }

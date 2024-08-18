@@ -2065,7 +2065,7 @@ public class ServiceSinkhole extends VpnService {
         }
 
         Allowed allowed = null;
-        if (packet.allowed)
+        if (packet.allowed) {
             if (mapForward.containsKey(packet.dport)) {
                 Forward fwd = mapForward.get(packet.dport);
                 if (fwd.ruid == packet.uid) {
@@ -2076,6 +2076,11 @@ public class ServiceSinkhole extends VpnService {
                 }
             } else
                 allowed = new Allowed();
+
+        } else {
+            // Not allowed.
+            allowed = new Allowed(false, Util.isInteractive(ServiceSinkhole.this));
+        }
 
         lock.readLock().unlock();
 

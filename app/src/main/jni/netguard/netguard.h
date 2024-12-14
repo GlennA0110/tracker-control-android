@@ -464,6 +464,9 @@ void write_rst(const struct arguments *args, struct tcp_session *cur);
 
 void write_rst_ack(const struct arguments *args, struct tcp_session *cur);
 
+ssize_t write_unreachable(const struct arguments *args, const uint8_t *pkt,
+                          size_t length, const int errorno);
+
 ssize_t write_icmp(const struct arguments *args, const struct icmp_session *cur,
                    uint8_t *data, size_t datalen);
 

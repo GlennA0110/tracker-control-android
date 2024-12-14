@@ -372,3 +372,169 @@ ssize_t write_icmp(const struct arguments *args, const struct icmp_session *cur,
 
     return res;
 }
+
+int calc_headers_length(const uint8_t *pkt, size_t length, int *protocol_ret) {
+    const uint8_t version = (*pkt) >> 4;
+
+    int protocol = 0;
+
+    int ipHdrLen = 0;
+    int protoHdrLen = 0;
+    int protoOptLen = 0;
+
+    if (version == 4) {
+        const struct iphdr *ip4 = (struct iphdr *) pkt;
+        ipHdrLen = sizeof(struct iphdr);
+
+        protocol = ip4->protocol;
+    } else if (version == 6) {
+        const struct ip6_hdr *ip6 = (struct ip6_hdr *) pkt;
+
+        // Skip extension headers
+        uint16_t off = 0;
+        protocol = ip6->ip6_nxt;
+        if (!is_upper_layer(protocol)) {
+            log_android(ANDROID_LOG_WARN, "IP6 extension %d", protocol);
+            off = sizeof(struct ip6_hdr);
+            struct ip6_ext *ext = (struct ip6_ext *) (pkt + off);
+            while (is_lower_layer(ext->ip6e_nxt) && !is_upper_layer(protocol)) {
+                protocol = ext->ip6e_nxt;
+                log_android(ANDROID_LOG_WARN, "IP6 extension %d", protocol);
+
+                off += (8 + ext->ip6e_len);
+                ext = (struct ip6_ext *) (pkt + off);
+            }
+            if (!is_upper_layer(protocol)) {
+                off = 0;
+                protocol = ip6->ip6_nxt;
+                log_android(ANDROID_LOG_WARN, "IP6 final extension %d", protocol);
+            }
+        }
+
+        ipHdrLen = sizeof(struct ip6_hdr) + off;
+    }
+
+    if (protocol == IPPROTO_TCP) {
+        protoHdrLen = sizeof(struct tcphdr);
+
+        const struct tcphdr *tcphdr = (struct tcphdr *) (pkt + ipHdrLen);
+        protoOptLen = (uint8_t) ((tcphdr->doff - 5) * 4);
+    }
+
+    if (protocol == IPPROTO_UDP) {
+        protoHdrLen = sizeof(struct udphdr);
+    }
+
+    log_android(ANDROID_LOG_WARN, "calc_headers_length p%d i%d l%d o%d: total %d", protocol, ipHdrLen, protoHdrLen, protoOptLen, (ipHdrLen + protoHdrLen + protoOptLen));
+
+    if (protocol_ret != NULL) *protocol_ret = protocol;
+
+    return ipHdrLen + protoHdrLen + protoOptLen;
+}
+
+ssize_t write_unreachable_v4(const struct arguments *args, const uint8_t *pkt,
+                          size_t length, const int errorno) {
+    int protocol = 0;
+
+    const int icmpHdrLen = 8;
+    const int pktHdrLen = calc_headers_length(pkt, length, &protocol);
+
+    u_int8_t *buffer;
+    struct icmp *icmp;
+
+    // Construct ICMPv4
+    buffer = ng_malloc(icmpHdrLen + pktHdrLen, "icmp unreachable v4");
+    icmp = (struct icmp *) buffer;
+
+    icmp->icmp_type = ICMP_UNREACH;
+    if (errorno == EHOSTUNREACH)
+        icmp->icmp_code = ICMP_UNREACH_HOST;
+    else
+        icmp->icmp_code = ICMP_UNREACH_NET;
+    icmp->icmp_cksum = 0;
+    icmp->icmp_hun.ih_void = 0;
+
+    memcpy(buffer + icmpHdrLen, pkt, pktHdrLen);
+
+    // Calculate ICMPv4 checksum
+    icmp->icmp_cksum = ~calc_checksum(0, buffer, icmpHdrLen + pktHdrLen);
+
+    const struct iphdr *ip4 = (struct iphdr *) pkt;
+
+    // Setup temporary ICMP session
+    struct icmp_session sicmp;
+    memset(&sicmp, 0, sizeof(struct icmp_session));
+    sicmp.version = 4;
+    sicmp.saddr.ip4 = (__be32) ip4->saddr;
+    sicmp.daddr.ip4 = (__be32) ip4->daddr;
+
+    ssize_t retVal = write_icmp(args, &sicmp, buffer, icmpHdrLen + pktHdrLen);
+
+    ng_free(buffer, __FILE__, __LINE__);
+
+    return retVal;
+}
+
+ssize_t write_unreachable_v6(const struct arguments *args, const uint8_t *pkt,
+                             size_t length, const int errorno) {
+    int protocol = 0;
+
+    const int icmpHdrLen = 8;
+    const int pktHdrLen = calc_headers_length(pkt, length, &protocol);
+
+    u_int8_t *buffer;
+    struct icmp *icmp;
+
+    // Construct ICMPv6
+    buffer = ng_malloc(icmpHdrLen + pktHdrLen, "icmp unreachable v6");
+    icmp = (struct icmp *) buffer;
+
+    icmp->icmp_type = ICMP6_DST_UNREACH;
+    if (errorno == EHOSTUNREACH)
+        icmp->icmp_code = ICMP6_DST_UNREACH_ADDR;
+    else
+        icmp->icmp_code = ICMP6_DST_UNREACH_NOROUTE;
+    icmp->icmp_cksum = 0;
+    icmp->icmp_hun.ih_void = 0;
+
+    memcpy(buffer + icmpHdrLen, pkt, pktHdrLen);
+
+    const struct ip6_hdr *ip6 = (struct ip6_hdr *) pkt;
+
+    // Calculate ICMPv6 checksum
+    struct ip6_hdr_pseudo pseudo;
+    memset(&pseudo, 0, sizeof(struct ip6_hdr_pseudo));
+    memcpy(&pseudo.ip6ph_src, &ip6->ip6_src, 16);
+    memcpy(&pseudo.ip6ph_dst, &ip6->ip6_dst, 16);
+    pseudo.ip6ph_len = htonl(icmpHdrLen + pktHdrLen);
+    pseudo.ip6ph_nxt = 58;  // Next header const 58 - RFC-4443
+
+    uint16_t csum = calc_checksum(0, (uint8_t *) &pseudo, sizeof(struct ip6_hdr_pseudo));
+    icmp->icmp_cksum = ~calc_checksum(csum, buffer, icmpHdrLen + pktHdrLen);
+
+    // Setup temporary ICMP session
+    struct icmp_session sicmp;
+    memset(&sicmp, 0, sizeof(struct icmp_session));
+    sicmp.version = 6;
+    memcpy(&sicmp.saddr.ip6, &ip6->ip6_src, 16);
+    memcpy(&sicmp.daddr.ip6, &ip6->ip6_dst, 16);
+
+    ssize_t retVal = write_icmp(args, &sicmp, buffer, icmpHdrLen + pktHdrLen);
+
+    ng_free(buffer, __FILE__, __LINE__);
+
+    return retVal;
+}
+
+ssize_t write_unreachable(const struct arguments *args, const uint8_t *pkt,
+                          size_t length, const int errorno) {
+    const uint8_t version = (*pkt) >> 4;
+
+    if (version == 4)
+        return write_unreachable_v4(args, pkt, length, errorno);
+
+    if (version == 6)
+        return write_unreachable_v6(args, pkt, length, errorno);
+
+    return -1;
+}

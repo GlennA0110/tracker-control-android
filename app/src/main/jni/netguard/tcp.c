@@ -26,6 +26,19 @@ extern char socks5_password[127 + 1];
 
 extern FILE *pcap_file;
 
+int close_tcp_socket(int socket) {
+    if (socket < 0)
+        return 0;  // If negative then it might be an error code, not a real socket
+
+    int result = close(socket);
+
+    if (result < 1)
+        log_android(ANDROID_LOG_ERROR, "TCP close %d error %d: %s",
+                    socket, errno, strerror(errno));
+
+    return result;
+}
+
 void clear_tcp_data(struct tcp_session *cur) {
     struct segment *s = cur->forward;
     while (s != NULL) {
@@ -773,6 +786,12 @@ jboolean handle_tcp(const struct arguments *args,
             // Open socket
             s->socket = open_tcp_socket(args, &s->tcp, redirect);
             if (s->socket < 0) {
+                if (s->socket < -1) {
+                    // Unreachable - tell the app (NB: socket will be -EHOSTUNREACH or -ENETUNREACH
+                    log_android(ANDROID_LOG_ERROR, "returning to app unreachable error %d: %s", -(s->socket), strerror(-(s->socket)));
+                    write_unreachable(args, pkt, length, -(s->socket));
+                }
+
                 // Remote might retry
                 ng_free(s, __FILE__, __LINE__);
                 return 0;
@@ -1054,8 +1073,10 @@ int open_tcp_socket(const struct arguments *args,
     }
 
     // Protect
-    if (protect_socket(args, sock) < 0)
+    if (protect_socket(args, sock) < 0) {
+        close_tcp_socket(sock);
         return -1;
+    }
 
     int on = 1;
     if (setsockopt(sock, SOL_TCP, TCP_NODELAY, &on, sizeof(on)) < 0)
@@ -1067,6 +1088,7 @@ int open_tcp_socket(const struct arguments *args,
     if (flags < 0 || fcntl(sock, F_SETFL, flags | O_NONBLOCK) < 0) {
         log_android(ANDROID_LOG_ERROR, "fcntl socket O_NONBLOCK error %d: %s",
                     errno, strerror(errno));
+        close_tcp_socket(sock);
         return -1;
     }
 
@@ -1121,7 +1143,14 @@ int open_tcp_socket(const struct arguments *args,
                                    ? sizeof(struct sockaddr_in)
                                    : sizeof(struct sockaddr_in6)));
     if (err < 0 && errno != EINPROGRESS) {
-        log_android(ANDROID_LOG_ERROR, "connect error %d: %s", errno, strerror(errno));
+        int errsav = errno;
+        log_android(ANDROID_LOG_ERROR, "connect error %d: %s", errsav, strerror(errno));
+
+        close_tcp_socket(sock);
+
+        if (errsav == EHOSTUNREACH || errsav == ENETUNREACH)
+            return -errsav;
+
         return -1;
     }
 

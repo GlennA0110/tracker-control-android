@@ -21,6 +21,19 @@
 
 extern FILE *pcap_file;
 
+int close_udp_socket(int socket) {
+    if (socket < 0)
+        return 0;  // If negative then it might be an error code, not a real socket
+
+    int result = close(socket);
+
+    if (result < 1)
+        log_android(ANDROID_LOG_ERROR, "UDP close %d error %d: %s",
+                    socket, errno, strerror(errno));
+
+    return result;
+}
+
 int get_udp_timeout(const struct udp_session *u, int sessions, int maxsessions) {
     int timeout = (ntohs(u->dest) == 53 ? UDP_TIMEOUT_53 : UDP_TIMEOUT_ANY);
 
@@ -58,9 +71,7 @@ int check_udp_session(const struct arguments *args, struct ng_session *s,
         log_android(ANDROID_LOG_INFO, "UDP close from %s/%u to %s/%u socket %d",
                     source, ntohs(s->udp.source), dest, ntohs(s->udp.dest), s->socket);
 
-        if (close(s->socket))
-            log_android(ANDROID_LOG_ERROR, "UDP close %d error %d: %s",
-                        s->socket, errno, strerror(errno));
+        close_udp_socket(s->socket);
         s->socket = -1;
 
         s->udp.time = time(NULL);
@@ -300,6 +311,12 @@ jboolean handle_udp(const struct arguments *args,
         // Open UDP socket
         s->socket = open_udp_socket(args, &s->udp, redirect);
         if (s->socket < 0) {
+            if (s->socket < -1) {
+                // Unreachable - tell the app (NB: socket will be -EHOSTUNREACH or -ENETUNREACH
+                log_android(ANDROID_LOG_ERROR, "returning to app unreachable error %d: %s", -(s->socket), strerror(-(s->socket)));
+                write_unreachable(args, pkt, length, -(s->socket));
+            }
+
             ng_free(s, __FILE__, __LINE__);
             return 0;
         }
@@ -330,40 +347,7 @@ jboolean handle_udp(const struct arguments *args,
 
     cur->udp.time = time(NULL);
 
-    int rversion;
-    struct sockaddr_in addr4;
-    struct sockaddr_in6 addr6;
-    if (redirect == NULL) {
-        rversion = cur->udp.version;
-        if (cur->udp.version == 4) {
-            addr4.sin_family = AF_INET;
-            addr4.sin_addr.s_addr = (__be32) cur->udp.daddr.ip4;
-            addr4.sin_port = cur->udp.dest;
-        } else {
-            addr6.sin6_family = AF_INET6;
-            memcpy(&addr6.sin6_addr, &cur->udp.daddr.ip6, 16);
-            addr6.sin6_port = cur->udp.dest;
-        }
-    } else {
-        rversion = (strstr(redirect->raddr, ":") == NULL ? 4 : 6);
-        log_android(ANDROID_LOG_WARN, "UDP%d redirect to %s/%u",
-                    rversion, redirect->raddr, redirect->rport);
-
-        if (rversion == 4) {
-            addr4.sin_family = AF_INET;
-            inet_pton(AF_INET, redirect->raddr, &addr4.sin_addr);
-            addr4.sin_port = htons(redirect->rport);
-        } else {
-            addr6.sin6_family = AF_INET6;
-            inet_pton(AF_INET6, redirect->raddr, &addr6.sin6_addr);
-            addr6.sin6_port = htons(redirect->rport);
-        }
-    }
-
-    if (sendto(cur->socket, data, (socklen_t) datalen, MSG_NOSIGNAL,
-               (rversion == 4 ? (const struct sockaddr *) &addr4
-                              : (const struct sockaddr *) &addr6),
-               (socklen_t) (rversion == 4 ? sizeof(addr4) : sizeof(addr6))) != datalen) {
+    if (send(cur->socket, data, (socklen_t) datalen, MSG_NOSIGNAL) != datalen) {
         log_android(ANDROID_LOG_ERROR, "UDP sendto error %d: %s", errno, strerror(errno));
         if (errno != EINTR && errno != EAGAIN) {
             cur->udp.state = UDP_FINISHING;
@@ -392,8 +376,10 @@ int open_udp_socket(const struct arguments *args,
     }
 
     // Protect socket
-    if (protect_socket(args, sock) < 0)
+    if (protect_socket(args, sock) < 0) {
+        close_udp_socket(sock);
         return -1;
+    }
 
     // Check for broadcast/multicast
     if (cur->version == 4) {
@@ -432,6 +418,54 @@ int open_udp_socket(const struct arguments *args,
         }
     }
 
+    int rversion;
+    struct sockaddr_in addr4;
+    struct sockaddr_in6 addr6;
+    if (redirect == NULL) {
+        rversion = cur->version;
+        if (cur->version == 4) {
+            addr4.sin_family = AF_INET;
+            addr4.sin_addr.s_addr = (__be32) cur->daddr.ip4;
+            addr4.sin_port = cur->dest;
+        } else {
+            addr6.sin6_family = AF_INET6;
+            memcpy(&addr6.sin6_addr, &cur->daddr.ip6, 16);
+            addr6.sin6_port = cur->dest;
+        }
+    } else {
+        rversion = (strstr(redirect->raddr, ":") == NULL ? 4 : 6);
+        log_android(ANDROID_LOG_WARN, "UDP%d redirect to %s/%u",
+                    rversion, redirect->raddr, redirect->rport);
+
+        if (rversion == 4) {
+            addr4.sin_family = AF_INET;
+            inet_pton(AF_INET, redirect->raddr, &addr4.sin_addr);
+            addr4.sin_port = htons(redirect->rport);
+        } else {
+            addr6.sin6_family = AF_INET6;
+            inet_pton(AF_INET6, redirect->raddr, &addr6.sin6_addr);
+            addr6.sin6_port = htons(redirect->rport);
+        }
+    }
+
+    // Initiate connect
+    int err = connect(sock,
+                      (version == 4 ? (const struct sockaddr *) &addr4
+                                    : (const struct sockaddr *) &addr6),
+                      (socklen_t) (version == 4
+                                   ? sizeof(struct sockaddr_in)
+                                   : sizeof(struct sockaddr_in6)));
+    if (err < 0 && errno != EINPROGRESS) {
+        int errsav = errno;
+        log_android(ANDROID_LOG_ERROR, "connect error %d: %s", errsav, strerror(errno));
+
+        close_udp_socket(sock);
+
+        if (errsav == EHOSTUNREACH || errsav == ENETUNREACH)
+            return -errsav;
+
+        return -1;
+    }
     return sock;
 }
 

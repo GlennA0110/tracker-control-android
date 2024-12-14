@@ -387,6 +387,9 @@ void handle_ip(const struct arguments *args,
 
         log_android(ANDROID_LOG_WARN, "Address v%d p%d %s/%u syn %d not allowed",
                     version, protocol, dest, dport, syn);
+
+        if (protocol == IPPROTO_TCP)
+            write_unreachable(args, pkt, length, ENETUNREACH);  //EHOSTUNREACH
     }
 }
 

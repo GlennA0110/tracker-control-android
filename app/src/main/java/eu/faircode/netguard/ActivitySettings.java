@@ -29,6 +29,7 @@ import android.content.Context;
 import android.content.DialogInterface;
 import android.content.Intent;
 import android.content.SharedPreferences;
+import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
 import android.content.res.AssetFileDescriptor;
 import android.database.Cursor;
@@ -86,6 +87,8 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Map;
 import java.util.Set;
+import java.util.TreeMap;
+import java.util.TreeSet;
 
 import javax.xml.parsers.ParserConfigurationException;
 import javax.xml.parsers.SAXParserFactory;
@@ -977,6 +980,10 @@ public class ActivitySettings extends AppCompatActivity implements SharedPrefere
         forwardExport(serializer);
         serializer.endTag(null, "forward");
 
+        serializer.startTag(null, "packagemap");
+        xmlExport(getReferencedUidsToPackagesMap(), serializer);
+        serializer.endTag(null, "packagemap");
+
         serializer.startTag(null, "blocklist");
         xmlExport(getSharedPreferences(PREF_BLOCKLIST, Context.MODE_PRIVATE), serializer);
         serializer.endTag(null, "blocklist");
@@ -988,6 +995,10 @@ public class ActivitySettings extends AppCompatActivity implements SharedPrefere
 
     private void xmlExport(SharedPreferences prefs, XmlSerializer serializer) throws IOException {
         Map<String, ?> settings = prefs.getAll();
+        xmlExport(settings, serializer);
+    }
+
+    private void xmlExport(Map<String, ?> settings, XmlSerializer serializer) throws IOException {
         for (String key : settings.keySet()) {
             Object value = settings.get(key);
 
@@ -1064,6 +1075,36 @@ public class ActivitySettings extends AppCompatActivity implements SharedPrefere
         }
     }
 
+    private Map<String,Set<String>> getReferencedUidsToPackagesMap() {
+        Set<Integer> allReferencedUids = new TreeSet<>();
+        allReferencedUids.addAll(TrackerBlocklist.getInstance(this).getBlocklist());
+        allReferencedUids.addAll(InternetBlocklist.getInstance(this).getBlocklist());
+
+        Map<String,Set<String>> returnValue = new TreeMap<>();
+        for (Integer pkgUid : allReferencedUids) {
+            String[] pkgNames = getPackages(pkgUid.intValue());
+            if (pkgNames == null || pkgNames.length < 1)
+                continue;
+
+            Set<String> pkgSet = new TreeSet<>();
+            for (String pkgName : pkgNames)
+                pkgSet.add(pkgName);
+
+            returnValue.put(pkgUid.toString(), pkgSet);
+        }
+
+        return returnValue;
+    }
+
+    private Map<String,Integer> getAllPackageToUidMap() {
+        Map<String,Integer> returnValue = new TreeMap<>();
+
+        for (PackageInfo pkg : getPackageManager().getInstalledPackages(0))
+            returnValue.put(pkg.packageName, Integer.valueOf(pkg.applicationInfo.uid));
+
+        return returnValue;
+    }
+
     private void xmlImport(InputStream in) throws IOException, SAXException, ParserConfigurationException {
         SharedPreferences prefs = PreferenceManager.getDefaultSharedPreferences(this);
         prefs.unregisterOnSharedPreferenceChangeListener(this);
@@ -1074,6 +1115,11 @@ public class ActivitySettings extends AppCompatActivity implements SharedPrefere
         XmlImportHandler handler = new XmlImportHandler(this);
         reader.setContentHandler(handler);
         reader.parse(new InputSource(in));
+
+        handler.remapImportUids();
+
+        // Convert Block List Tracker entries to Domain Name entries
+        handler.remapBlockList();
 
         xmlImport(handler.application, prefs);
         xmlImport(handler.wifi, getSharedPreferences("wifi", Context.MODE_PRIVATE));
@@ -1138,6 +1184,7 @@ public class ActivitySettings extends AppCompatActivity implements SharedPrefere
         public Map<String, Object> lockdown = new HashMap<>();
         public Map<String, Object> apply = new HashMap<>();
         public Map<String, Object> notify = new HashMap<>();
+        public Map<String, Object> packagemap = new TreeMap<>();
         public Map<String, Object> blocklist = new HashMap<>();
         private Map<String, Object> current = null;
 
@@ -1183,8 +1230,11 @@ public class ActivitySettings extends AppCompatActivity implements SharedPrefere
                 Log.i(TAG, "Clearing forwards");
                 DatabaseHelper.getInstance(context).deleteForward();
 
-            } else if (qName.equals("blocklist"))
-                    current = blocklist;
+            } else if (qName.equals("packagemap"))
+                current = packagemap;
+
+            else if (qName.equals("blocklist"))
+                current = blocklist;
 
             else if (qName.equals("setting")) {
                 String key = attributes.getValue("key");
@@ -1253,5 +1303,121 @@ public class ActivitySettings extends AppCompatActivity implements SharedPrefere
             else
                 return getPackageManager().getApplicationInfo(pkg, 0).uid;
         }
+
+        protected void remapImportUids() {
+            if (packagemap.isEmpty()) {
+                Log.e(TAG, "No package map in import, not remapping UIDs");
+                return;
+            }
+
+            Log.i(TAG, "Remapping UIDs in import");
+
+            Map<String,Integer> packageToUidMap = getAllPackageToUidMap();
+
+            Map<String,Set<String>> importingBlocklist = (Map<String,Set<String>>)(Object)blocklist;
+
+            blocklist = new HashMap<>();
+
+            Set<String> internetBlocked = importingBlocklist.get(InternetBlocklist.SHARED_PREFS_INTERNET_BLOCKLIST_APPS_KEY);
+            Set<String> newInternetBlocked = new HashSet<>();
+            for (String impUid : internetBlocked) {
+                Set<String> impPackages = (Set<String>)packagemap.get(impUid);
+                if (impPackages == null || impPackages.isEmpty()) {
+                    Log.w(TAG, "Import InternetBlocked: Referenced Uid not in PackageMap. Orphan entry?: " + impUid);
+                    continue;
+                }
+                for (String impPackage : impPackages) {
+                    if (packageToUidMap.containsKey(impPackage)) {
+                        String localUid = packageToUidMap.get(impPackage).toString();
+                        Log.i(TAG, "Import InternetBlocked: Import UID " + impUid + " package " + impPackage + " mapped to local UID " + localUid);
+                        newInternetBlocked.add(localUid);
+                        break;
+                    }
+                }
+            }
+            blocklist.put(InternetBlocklist.SHARED_PREFS_INTERNET_BLOCKLIST_APPS_KEY, newInternetBlocked);
+
+            Set<String> trackerBlocked = importingBlocklist.get(TrackerBlocklist.SHARED_PREFS_BLOCKLIST_APPS_KEY);
+            Set<String> newTrackerBlocked = new HashSet<>();
+            for (String impUid : trackerBlocked) {
+                Set<String> impPackages = (Set<String>)packagemap.get(impUid);
+                if (impPackages == null || impPackages.isEmpty()) {
+                    Log.w(TAG, "Import TrackerBlocklist: Referenced Uid not in PackageMap. Orphan entry?: " + impUid);
+                    continue;
+                }
+                for (String impPackage : impPackages) {
+                    if (packageToUidMap.containsKey(impPackage)) {
+                        String localUid = packageToUidMap.get(impPackage).toString();
+                        Log.i(TAG, "Import TrackerBlocklist: Import UID " + impUid + " package " + impPackage + " mapped to local UID " + localUid);
+                        newTrackerBlocked.add(localUid);
+                        Object trackerBlockedSetting = importingBlocklist.get(TrackerBlocklist.SHARED_PREFS_BLOCKLIST_APPS_KEY + "_" + impUid);
+                        blocklist.put(TrackerBlocklist.SHARED_PREFS_BLOCKLIST_APPS_KEY + "_" + localUid, trackerBlockedSetting);
+                        break;
+                    }
+                }
+            }
+            blocklist.put(TrackerBlocklist.SHARED_PREFS_BLOCKLIST_APPS_KEY, newTrackerBlocked);
+
+            Log.i(TAG, "Remapping UIDs in import complete");
+        }
+
+        protected void remapBlockList() {
+            Log.i(TAG, "Rebuilding Domain Name Block List entries");
+
+            // Iterate through settings for each app
+            for (Map.Entry<String,Object> entry : blocklist.entrySet()) {
+                Set<String> newEntries = new HashSet<>();
+
+                Log.i(TAG, "Rebuilding for app " + entry.getKey());
+
+                // Iterate through entries for an app
+                for (String value : (Set<String>)entry.getValue()) {
+                    // Keep the existing value
+                    Log.i(TAG, "  Existing entry: " + value);
+                    newEntries.add(value);
+
+                    // No | means its a Category name or Domain Name, keep as-is and move on
+                    if (value.indexOf('|') < 0)
+                        continue;
+
+                    // Split on the Pipe. Should split as [{Category}, {Tracker}]
+                    String[] splitValue = value.split("\\|");
+
+                    // If it's not in two parts something is not as expected, so leave it.
+                    if (splitValue.length != 2) {
+                        Log.w(TAG, "    Block List entry didn't split into two, got " + splitValue.length + " from: " + value);
+                        continue;
+                    }
+
+                    String category = splitValue[0].trim();
+                    if (!category.equals("Google-API") && !category.equals("Non-Tracker") && !category.equals("Uncategorised"))
+                        // Domain Name entries are only is these categories, so ignore other categories.
+                        continue;
+
+                    String name = splitValue[1].trim();
+
+                    if (name.indexOf('(') > 0) {
+                        // Is of form "{domain} ({company})", so remove the piece in brackets
+                        Log.i(TAG, "    Removing Company Name from " + name);
+                        name = name.substring(0, name.indexOf('(')).trim();
+                        Log.i(TAG, "    Removed Company Name now " + name);
+                    }
+
+                    if (name.indexOf(".") < 0)
+                        // No dots so not a domain name
+                        continue;
+
+                    Log.i(TAG, "  Additional entry: " + name);
+                    newEntries.add(name);
+                }
+
+                entry.setValue(newEntries);
+                Log.i(TAG, "Rebuilt for app " + entry.getKey());
+            }
+
+            Log.i(TAG, "Rebuilding Domain Name Block List entries complete");
+        }
+
     }
+
 }
